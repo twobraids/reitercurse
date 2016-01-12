@@ -48,6 +48,40 @@ class RedemptionToken(object):
         return self.args == other.args and self.static_kwargs == other.static_kwargs
 
 
+class ExecutionStack(object):
+    execution_stack = []
+    in_use = False
+
+    @classmethod
+    def execute(kls):
+        kls.in_use = True
+        while kls.execution_stack:
+            the_top_unknown = kls.execution_stack.pop()
+            the_top_redemption_token = the_top_unknown.redemption_token
+
+            try:
+                result_for_top_unknown = the_top_unknown.defining_function.result_cache[the_top_redemption_token]
+            except KeyError:
+                next_args, next_kwargs = the_top_redemption_token
+                result_for_top_unknown = the_top_unknown.defining_function(*next_args, **next_kwargs)
+
+                if isinstance(result_for_top_unknown, UnknownValue):
+                    # the result for the top unknown was another unknown
+                    # push the top unknown back onto the stack
+                    kls.execution_stack.append(the_top_unknown)
+                    # the quest for a new value for the top unknown
+                    # resulted in the creation of a new unknown. Fetch
+                    # that new unknown from the unknown creation stack
+                    # and push it onto the execution_stack
+                    #result_for_top_unknown.defining_function.execution_stack.append(result_for_top_unknown)
+                    kls.execution_stack.append(result_for_top_unknown)
+                else:
+                    # constant case
+                    the_top_unknown.defining_function.result_cache[the_top_redemption_token] = result_for_top_unknown
+        kls.in_use = False
+        return result_for_top_unknown
+
+
 def r2i(fn):
     """this decorator takes a recursive function and ensures that it gets
     evalutated iteratively instead.  To be successful, the recursive method
@@ -74,19 +108,10 @@ def r2i(fn):
     def create_unknown(*args, **kwargs):
         redemption_token=RedemptionToken(*args, **kwargs)
         class TaggedUnknownValue(UnknownValue):
-            """instances of this class are used to represent a value that cannot be
-            calculated at the current moment. It is a placeholder.  It is to be
-            returned by calls to recursive functions to stop them from recursing.
-            It is based on MagicMock because MagicMock is a class that can survive
-            without error from statements like this:
-
-                def recursive_method(x):
-                    # ...
-                    return recursive_method(x - 1) * 10 + recursive_method(x - 2) * 100
-
-            The MagicMock captures the entire expression and returns an new instance
-            of MagicMock.  Instance are placeholders only. No reconstruction of the
-            expression is attempted from the MagicMock, it's just a thing that survives.
+            """Each set of recursive method arguments has its own
+            TaggedUnknownValue type.  They contain a reference to the
+            recursive function being wrapped by the decorator as well as
+            a reference to the redemption token.
             """
             def __init__(self, *args, **kwargs):
                 super(UnknownValue, self).__init__(
@@ -103,66 +128,42 @@ def r2i(fn):
                     self.redemption_token.kwargs
                 ))
 
-        print 'creating unknown for', fn.func_name, args, kwargs
         future = TaggedUnknownValue()
-        fn.unknown_creation_stack.append(future)
-        print "HEY", future.redemption_token.args, future.redemption_token.kwargs
         return future
 
     @wraps(fn)
     def wrapper(*args, **kwargs):
+        """This is the method that actually replaces the recursive function
+        and traps the calls to that function. """
         try:
-            if fn.recursion_monitoring_stack:
+            if fn.result_cache:
                 pass
         except AttributeError:
-            fn.recursion_monitoring_stack = []
-            fn.execution_stack = []
             fn.result_cache = {}
-            fn.unknown_creation_stack = []
+            fn.in_use = False
 
         local_redemption_token = RedemptionToken(*args, **kwargs)
-        fn.recursion_monitoring_stack.append(local_redemption_token)
-        level = len(fn.recursion_monitoring_stack)
-        assert local_redemption_token.args == args
 
         if local_redemption_token in fn.result_cache:
             # memoizing trap for calls to original function
             result = fn.result_cache[local_redemption_token]
-        elif level > 1:
+            return result
+        elif fn.in_use:
             # trap to capture any attempts to recurse beyond the 2 level of
             # the original function
             result = create_unknown(*args, **kwargs)
+            return result
+        # this section is reached iff it is the original client call to
+        # the original function
+        fn.in_use = True
+        first_future = create_unknown(*args, **kwargs)
+        if not ExecutionStack.in_use:
+            ExecutionStack.execution_stack.append(first_future)
+            result = ExecutionStack.execute()
         else:
-            # this section is reached iff it is the original client call to
-            # the original function
-            first_future = create_unknown(*args, **kwargs)
-            fn.execution_stack.append(first_future)
-            while fn.execution_stack:
-                the_top_unknown = fn.execution_stack.pop()
-                the_top_redemption_token = the_top_unknown.redemption_token
+            return first_future
 
-                try:
-                    result_for_top_unknown = fn.result_cache[the_top_redemption_token]
-                except KeyError:
-                    next_args, next_kwargs = the_top_redemption_token
-                    result_for_top_unknown = fn(*next_args, **next_kwargs)
-
-                    if isinstance(result_for_top_unknown, UnknownValue):
-                        # the result for the top unknown was another unknown
-                        # push the top unknown back onto the stack
-                        fn.execution_stack.append(the_top_unknown)
-                        # the quest for a new value for the top unknown
-                        # resulted in the creation of a new unknown. Fetch
-                        # that new unknown from the unknown creation stack
-                        # and push it onto the execution_stack
-                        next_unknown = fn.unknown_creation_stack.pop()
-                        fn.execution_stack.append(next_unknown)
-                    else:
-                        # constant case
-                        fn.result_cache[the_top_redemption_token] = result_for_top_unknown
-            result = result_for_top_unknown
-
-        fn.recursion_monitoring_stack.pop()
+        fn.in_use = False
         return result
     return wrapper
 
@@ -232,16 +233,20 @@ def ifib2(n):
     return ifib2(n - 1) + ifib1(n - 2)
 
 
-for x in range(10):
-    print x, "ifib:", ifib(x), 'rfib:', rfib(x), 'ifib1', ifib1(x)
-print 'ifib', 1001, ifib(1001), 'rfib:',
+for x in range(30):
+    print x, "ifib:", ifib(x), 'ifib1/ifib2',  ifib1(x), 'rfib:', rfib(x)
+
+
+
+print '2000 ifib       ', ifib(2000)
+print '2000 ifib1/ifib2', ifib1(2000)
+print '2000 rfib:      ',
 try:
-    print rfib(1001)
+    print rfib(2000)
 except RuntimeError, e:
     print e
 
 
-print 'ifib1(2000)', ifib1(10)
 
 
 @r2i
@@ -286,16 +291,4 @@ assert (
 
 
 
-
-@r2i
-def ifib1(n):
-    if n < 3:
-        return n
-    return ifib1(n - 1) + ifib2(n - 2)
-
-@r2i
-def ifib2(n):
-    if n < 3:
-        return n
-    return ifib2(n - 1) + ifib1(n - 2)
 
