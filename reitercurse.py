@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 from mock import MagicMock
 from functools import wraps
 
@@ -46,12 +48,50 @@ class RedemptionToken(object):
         return self.args == other.args and self.static_kwargs == other.static_kwargs
 
 
-def r2i(fn):
+class ExecutionStack(object):
+    execution_stack = []
+    in_use = False
+
+    @classmethod
+    def execute(kls):
+        kls.in_use = True
+        try:
+            while kls.execution_stack:
+                the_top_unknown = kls.execution_stack.pop()
+                the_top_redemption_token = the_top_unknown.redemption_token
+
+                try:
+                    result_for_top_unknown = the_top_unknown.defining_function.result_cache[the_top_redemption_token]
+                except KeyError:
+                    next_args, next_kwargs = the_top_redemption_token
+                    result_for_top_unknown = the_top_unknown.defining_function(*next_args, **next_kwargs)
+
+                    if isinstance(result_for_top_unknown, UnknownValue):
+                        # the result for the top unknown was another unknown
+                        # push the top unknown back onto the stack
+                        kls.execution_stack.append(the_top_unknown)
+                        # the quest for a new value for the top unknown
+                        # resulted in the creation of a new unknown. Fetch
+                        # that new unknown from the unknown creation stack
+                        # and push it onto the execution_stack
+                        #result_for_top_unknown.defining_function.execution_stack.append(result_for_top_unknown)
+                        kls.execution_stack.append(result_for_top_unknown)
+                    else:
+                        # constant case
+                        the_top_unknown.defining_function.result_cache[the_top_redemption_token] = result_for_top_unknown
+            return result_for_top_unknown
+        finally:
+            kls.in_use = False
+
+
+
+def execute_iteratively(fn):
     """this decorator takes a recursive function and ensures that it gets
     evalutated iteratively instead.  To be successful, the recursive method
     must have the following attributes:
        1. parameters passed in must be hashable and static.
        2. return is used as the method of getting results, no side effects.
+       3. the value returned must be 'mockable'.
 
     The decorator accomplishes the task by trapping each call to the recurisive
     method.  There are three outcomes:
@@ -70,198 +110,137 @@ def r2i(fn):
           attempted in the recursive call.
     """
     def create_unknown(*args, **kwargs):
-        future = UnknownValue()
-        future.redemption_token = RedemptionToken(*args, **kwargs)
-        fn.unknown_creation_stack.append(future)
+        redemption_token=RedemptionToken(*args, **kwargs)
+        class TaggedUnknownValue(UnknownValue):
+            """Each set of recursive method arguments has its own
+            TaggedUnknownValue type.  They contain a reference to the
+            recursive function being wrapped by the decorator as well as
+            a reference to the redemption token.
+            """
+            def __init__(self, *args, **kwargs):
+                super(UnknownValue, self).__init__(
+                    *args,
+                    defining_function=fn,
+                    redemption_token=redemption_token,
+                    **kwargs
+                )
+
+            def __repr__(self):
+                return str((
+                    self.defining_function.func_name,
+                    self.redemption_token.args,
+                    self.redemption_token.kwargs
+                ))
+
+        future = TaggedUnknownValue()
         return future
 
     @wraps(fn)
     def wrapper(*args, **kwargs):
+        """This is the method that actually replaces the recursive function
+        and traps the calls to that function. """
         try:
-            if fn.recursion_monitoring_stack:
+            if fn.result_cache:
                 pass
         except AttributeError:
-            fn.recursion_monitoring_stack = []
-            fn.execution_stack = []
             fn.result_cache = {}
-            fn.unknown_creation_stack = []
+            fn.in_use = False
 
         local_redemption_token = RedemptionToken(*args, **kwargs)
-        fn.recursion_monitoring_stack.append(local_redemption_token)
-        level = len(fn.recursion_monitoring_stack)
-        assert local_redemption_token.args == args
 
         if local_redemption_token in fn.result_cache:
             # memoizing trap for calls to original function
             result = fn.result_cache[local_redemption_token]
-        elif level > 1:
+            return result
+        elif fn.in_use:
             # trap to capture any attempts to recurse beyond the 2 level of
             # the original function
             result = create_unknown(*args, **kwargs)
+            return result
+        # this section is reached iff it is the original client call to
+        # the original function
+        fn.in_use = True
+        first_future = create_unknown(*args, **kwargs)
+        if not ExecutionStack.in_use:
+            ExecutionStack.execution_stack.append(first_future)
+            result = ExecutionStack.execute()
         else:
-            # this section is reached iff it is the original client call to
-            # the original function
-            first_future = create_unknown(*args, **kwargs)
-            fn.execution_stack.append(first_future)
-            while fn.execution_stack:
-                the_top_unknown = fn.execution_stack.pop()
-                the_top_redemption_token = the_top_unknown.redemption_token
+            return first_future
 
-                try:
-                    result_for_top_unknown = fn.result_cache[the_top_redemption_token]
-                except KeyError:
-                    next_args, next_kwargs = the_top_redemption_token
-                    result_for_top_unknown = fn(*next_args, **next_kwargs)
-
-                    if isinstance(result_for_top_unknown, UnknownValue):
-                        # the result for the top unknown was another unknown
-                        # push the top unknown back onto the stack
-                        fn.execution_stack.append(the_top_unknown)
-                        # the quest for a new value for the top unknown
-                        # resulted in the creation of a new unknown. Fetch
-                        # that new unknown from the unknown creation stack
-                        # and push it onto the execution_stack
-                        next_unknown = fn.unknown_creation_stack.pop()
-                        fn.execution_stack.append(next_unknown)
-                    else:
-                        # constant case
-                        fn.result_cache[the_top_redemption_token] = result_for_top_unknown
-            result = result_for_top_unknown
-
-        fn.recursion_monitoring_stack.pop()
+        fn.in_use = False
         return result
     return wrapper
 
+from collections import Sequence
+
+@execute_iteratively
+def isearch(t):
+    my_evens = []
+    if isinstance(t, Sequence):
+        for item in t:
+            evens = isearch(item)
+            my_evens.extend(evens)
+    elif isinstance(t, int):
+        if not t % 2:
+            my_evens.append(t)
+    return my_evens
+
+
+def rsearch(t):
+    my_evens = []
+    if isinstance(t, Sequence):
+        for item in t:
+            evens = rsearch(item)
+            my_evens.extend(evens)
+    elif isinstance(t, int):
+        if not t % 2:
+            my_evens.append(t)
+    return my_evens
+
+def grsearch(t):
+    if isinstance(t, Sequence):
+        for i in t:
+            if isinstance(i, Sequence):
+                for j in grsearch(i):
+                    yield j
+            else:
+                if isinstance(i, int):
+                    if not i % 2:
+                        yield i
 
 
 
-@r2i
-def ifact(n):
-    if n < 2:
-        return 1
-    else:
-        return ifact(n - 1) * n
 
-def rfact(n):
-    if n < 2:
-        return 1
-    else:
-        return rfact(n - 1) * n
-
-assert (ifact(800) == rfact(800))
-
-for x in range(10):
-    print x, "ifact:", ifact(x), 'rfact:', rfact(x)
-print 'ifact', 1001, ifact(1001), 'rfact:',
-try:
-    print rfact(1001)
-except RuntimeError, e:
-    print e
-
-
-
-@r2i
-def ifib(n):
-    if n < 3:
-        return n
-    return ifib(n - 1) + ifib(n - 2)
-
-def memo(fn):
-    @wraps(fn)
-    def wrapped(n):
-        try:
-            if n in fn.cache:
-                return fn.cache[n]
-        except AttributeError:
-            fn.cache = {}
-        result = fn(n)
-        fn.cache[n] = result
-        return result
-    return wrapped
-
-@memo
-def rfib(n):
-    if n < 3:
-        return n
-    return rfib(n - 1) + rfib(n - 2)
-
-@r2i
-def ifib1(n):
-    if n < 3:
-        return n
-    return ifib1(n - 1) + ifib2(n - 2)
-
-@r2i
-def ifib2(n):
-    if n < 3:
-        return n
-    return ifib2(n - 1) + ifib1(n - 2)
-
-
-for x in range(10):
-    print x, "ifib:", ifib(x), 'rfib:', rfib(x), 'ifib1', ifib1(x)
-print 'ifib', 1001, ifib(1001), 'rfib:',
-try:
-    print rfib(1001)
-except RuntimeError, e:
-    print e
-
-
-print 'ifib1(2000)', ifib1(10)
-
-
-@r2i
-def iisPalindrome(S):
-    # Remove spaces in the string
-    N = S.split()
-    N = ''.join(N)
-    if len(N) == 1 or len(N) == 0:
-        return True
-    else:
-        if N[0] == N[-1] and iisPalindrome(N[1:-1]):
-            return True
-        else:
-            return False
-
-
-def risPalindrome(S):
-    # Remove spaces in the string
-    N = S.split()
-    N = ''.join(N)
-    if len(N) == 1 or len(N) == 0:
-        return True
-    else:
-        if N[0] == N[-1] and risPalindrome(N[1:-1]):
-            return True
-        else:
-            return False
-
-
-assert (
-    iisPalindrome('abba') == risPalindrome('abba')
-)
-assert (
-    iisPalindrome('aoeu') == risPalindrome('aoeu')
-)
-assert (
-    iisPalindrome('abba'*100) == risPalindrome('abba'*100)
-)
-assert (
-    iisPalindrome('abeba') == risPalindrome('abeba')
+tree = (
+    (
+        (1, 3, 5),
+        (2, 4, 5)
+    ),
+    (9, 11, 13),
+    (22, 9),
+    (
+        (1, -33, 44),
+        (
+            (99, 100),
+        )
+    ),
+    102,
+    104,
+    103
 )
 
+print [x for x in grsearch(tree)]
+
+print isearch(tree)
 
 
 
-@r2i
-def ifib1(n):
-    if n < 3:
-        return n
-    return ifib1(n - 1) + ifib2(n - 2)
+def get_even(number):
+    while True:
+        if not number % 2:
+            number = yield number
+        number += 1
 
-@r2i
-def ifib2(n):
-    if n < 3:
-        return n
-    return ifib2(n - 1) + ifib1(n - 2)
+
+
 
