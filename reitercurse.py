@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 from mock import MagicMock
 from functools import wraps
 
@@ -70,9 +72,41 @@ def r2i(fn):
           attempted in the recursive call.
     """
     def create_unknown(*args, **kwargs):
-        future = UnknownValue()
-        future.redemption_token = RedemptionToken(*args, **kwargs)
+        redemption_token=RedemptionToken(*args, **kwargs)
+        class TaggedUnknownValue(UnknownValue):
+            """instances of this class are used to represent a value that cannot be
+            calculated at the current moment. It is a placeholder.  It is to be
+            returned by calls to recursive functions to stop them from recursing.
+            It is based on MagicMock because MagicMock is a class that can survive
+            without error from statements like this:
+
+                def recursive_method(x):
+                    # ...
+                    return recursive_method(x - 1) * 10 + recursive_method(x - 2) * 100
+
+            The MagicMock captures the entire expression and returns an new instance
+            of MagicMock.  Instance are placeholders only. No reconstruction of the
+            expression is attempted from the MagicMock, it's just a thing that survives.
+            """
+            def __init__(self, *args, **kwargs):
+                super(UnknownValue, self).__init__(
+                    *args,
+                    defining_function=fn,
+                    redemption_token=redemption_token,
+                    **kwargs
+                )
+
+            def __repr__(self):
+                return str((
+                    self.defining_function.func_name,
+                    self.redemption_token.args,
+                    self.redemption_token.kwargs
+                ))
+
+        print 'creating unknown for', fn.func_name, args, kwargs
+        future = TaggedUnknownValue()
         fn.unknown_creation_stack.append(future)
+        print "HEY", future.redemption_token.args, future.redemption_token.kwargs
         return future
 
     @wraps(fn)
