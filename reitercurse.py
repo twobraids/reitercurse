@@ -29,23 +29,44 @@ class RedemptionToken(object):
     UnknownValue."""
     def __init__(self, *args, **kwargs):
             self.args = args
-            self.static_kwargs = tuple(
-                kwargs_key_value for kwargs_key_value in kwargs.iteritems()
-            )
 
-    @property
-    def kwargs(self):
-        return dict(self.static_kwargs)
+            args_list = []
+            for x in args:
+                if hasattr(x, '__hash__') and x.__hash__:
+                    args_list.append(x)
+                else:
+                    # not necessarily the best way to freeze a
+                    # mutable item - it assumes the mutable is a list
+                    # of immutables
+                    args_list.append(tuple(x))
+            self.static_args = tuple(args_list)
+
+            self.kwargs = kwargs
+            kwargs_list = []
+            for k, v in kwargs.iteritems():
+                if hasattr(v, '__hash__') and v.__hash__:
+                    kwargs_list.append((k, v))
+                else:
+                    # not necessarily the best way to freeze a
+                    # mutable item - it assumes the mutable is a dict
+                    # and that no state information is held within the
+                    # values of the dict
+                    kwargs_list.append ((k, tuple(v)))
+            self.static_kwargs = tuple(kwargs_list)
 
     def __iter__(self):
         yield self.args
         yield self.kwargs
 
     def __hash__(self):
-        return (self.args, self.static_kwargs).__hash__()
+        try:
+            return self.hash_value
+        except AttributeError:
+            self.hash_value = (self.static_args, self.static_kwargs).__hash__()
+            return self.hash_value
 
     def __eq__(self, other):
-        return self.args == other.args and self.static_kwargs == other.static_kwargs
+        return self.static_args == other.static_args and self.static_kwargs == other.static_kwargs
 
 
 class ExecutionStack(object):
@@ -82,6 +103,7 @@ class ExecutionStack(object):
             return result_for_top_unknown
         finally:
             kls.in_use = False
+            kls.execution_stack = []
 
 
 
@@ -109,20 +131,26 @@ def execute_iteratively(fn):
           an "Unknown" with a redemption key that is the args/kwargs that was
           attempted in the recursive call.
     """
-    def create_unknown(*args, **kwargs):
-        redemption_token=RedemptionToken(*args, **kwargs)
+    def create_unknown(*outer_args, **outer_kwargs):
+        redemption_token=RedemptionToken(*outer_args, **outer_kwargs)
         class TaggedUnknownValue(UnknownValue):
             """Each set of recursive method arguments has its own
             TaggedUnknownValue type.  They contain a reference to the
             recursive function being wrapped by the decorator as well as
             a reference to the redemption token.
+
+            by defining this within the scope of this method, the underlying
+            MagicMock will know about both 'fn' and the 'redemption_token'.
+            That means that any children of that MagicMock will also have
+            those values. This enables statements like:
+                return fn(n - 1) * n
+            to return a child mock that still has the context of the original
+            call.
             """
             def __init__(self, *args, **kwargs):
                 super(UnknownValue, self).__init__(
-                    *args,
                     defining_function=fn,
                     redemption_token=redemption_token,
-                    **kwargs
                 )
 
             def __repr__(self):
@@ -131,7 +159,6 @@ def execute_iteratively(fn):
                     self.redemption_token.args,
                     self.redemption_token.kwargs
                 ))
-
         future = TaggedUnknownValue()
         return future
 
@@ -139,20 +166,19 @@ def execute_iteratively(fn):
     def wrapper(*args, **kwargs):
         """This is the method that actually replaces the recursive function
         and traps the calls to that function. """
+
+        local_redemption_token = RedemptionToken(*args, **kwargs)
+
         try:
-            if fn.result_cache:
-                pass
+            if local_redemption_token in fn.result_cache:
+                # memoizing trap for calls to original function
+                result = fn.result_cache[local_redemption_token]
+                return result
         except AttributeError:
             fn.result_cache = {}
             fn.in_use = False
 
-        local_redemption_token = RedemptionToken(*args, **kwargs)
-
-        if local_redemption_token in fn.result_cache:
-            # memoizing trap for calls to original function
-            result = fn.result_cache[local_redemption_token]
-            return result
-        elif fn.in_use:
+        if fn.in_use:
             # trap to capture any attempts to recurse beyond the 2 level of
             # the original function
             result = create_unknown(*args, **kwargs)
@@ -163,84 +189,19 @@ def execute_iteratively(fn):
         first_future = create_unknown(*args, **kwargs)
         if not ExecutionStack.in_use:
             ExecutionStack.execution_stack.append(first_future)
-            result = ExecutionStack.execute()
+            try:
+                result = ExecutionStack.execute()
+            except BaseException:
+                # we've no idea what kind of exceptions could be raised
+                # by the function fn, so we've got to catch them all
+                # and make sure that the flag about fn in use has to get
+                # reset
+                fn.in_use = False
+                raise
         else:
             return first_future
 
         fn.in_use = False
         return result
     return wrapper
-
-from collections import Sequence
-
-@execute_iteratively
-def isearch(t):
-    my_evens = []
-    if isinstance(t, Sequence):
-        for item in t:
-            evens = isearch(item)
-            my_evens.extend(evens)
-    elif isinstance(t, int):
-        if not t % 2:
-            my_evens.append(t)
-    return my_evens
-
-
-def rsearch(t):
-    my_evens = []
-    if isinstance(t, Sequence):
-        for item in t:
-            evens = rsearch(item)
-            my_evens.extend(evens)
-    elif isinstance(t, int):
-        if not t % 2:
-            my_evens.append(t)
-    return my_evens
-
-def grsearch(t):
-    if isinstance(t, Sequence):
-        for i in t:
-            if isinstance(i, Sequence):
-                for j in grsearch(i):
-                    yield j
-            else:
-                if isinstance(i, int):
-                    if not i % 2:
-                        yield i
-
-
-
-
-tree = (
-    (
-        (1, 3, 5),
-        (2, 4, 5)
-    ),
-    (9, 11, 13),
-    (22, 9),
-    (
-        (1, -33, 44),
-        (
-            (99, 100),
-        )
-    ),
-    102,
-    104,
-    103
-)
-
-print [x for x in grsearch(tree)]
-
-print isearch(tree)
-
-
-
-def get_even(number):
-    while True:
-        if not number % 2:
-            number = yield number
-        number += 1
-
-
-
 
