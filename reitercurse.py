@@ -3,6 +3,8 @@
 from mock import MagicMock
 from functools import wraps
 
+import threading
+
 class UnknownValue(MagicMock):
     """instances of this class are used to represent a value that cannot be
     calculated at the current moment. It is a placeholder.  It is to be
@@ -70,19 +72,35 @@ class RedemptionToken(object):
 
 
 class ExecutionStack(object):
-    execution_stack = []
-    in_use = False
+    local_storage = threading.local()
+
+    @classmethod
+    def is_in_use(kls):
+        try:
+            return kls.local_storage.in_use
+        except AttributeError:
+            kls.local_storage.in_use = False
+            return False
+
+    @classmethod
+    def get_execution_stack(kls):
+        try:
+            return kls.local_storage.execution_stack
+        except AttributeError, x:
+            kls.local_storage.execution_stack = []
+            return kls.local_storage.execution_stack
 
     @classmethod
     def execute(kls):
-        kls.in_use = True
+        kls.local_storage.in_use = True
         try:
-            while kls.execution_stack:
-                the_top_unknown = kls.execution_stack.pop()
+            execution_stack = kls.get_execution_stack()
+            while execution_stack:
+                the_top_unknown = execution_stack.pop()
                 the_top_redemption_token = the_top_unknown.redemption_token
 
                 try:
-                    result_for_top_unknown = the_top_unknown.defining_function.result_cache[the_top_redemption_token]
+                    result_for_top_unknown = the_top_unknown.defining_function.local_storage.result_cache[the_top_redemption_token]
                 except KeyError:
                     next_args, next_kwargs = the_top_redemption_token
                     result_for_top_unknown = the_top_unknown.defining_function(*next_args, **next_kwargs)
@@ -90,20 +108,22 @@ class ExecutionStack(object):
                     if isinstance(result_for_top_unknown, UnknownValue):
                         # the result for the top unknown was another unknown
                         # push the top unknown back onto the stack
-                        kls.execution_stack.append(the_top_unknown)
+                        execution_stack.append(the_top_unknown)
                         # the quest for a new value for the top unknown
                         # resulted in the creation of a new unknown. Fetch
                         # that new unknown from the unknown creation stack
                         # and push it onto the execution_stack
                         #result_for_top_unknown.defining_function.execution_stack.append(result_for_top_unknown)
-                        kls.execution_stack.append(result_for_top_unknown)
+                        execution_stack.append(result_for_top_unknown)
+##                        print "PUSH", execution_stack
                     else:
                         # constant case
-                        the_top_unknown.defining_function.result_cache[the_top_redemption_token] = result_for_top_unknown
+                        the_top_unknown.defining_function.local_storage.result_cache[the_top_redemption_token] = result_for_top_unknown
+##                        print "POP ", execution_stack
             return result_for_top_unknown
         finally:
-            kls.in_use = False
-            kls.execution_stack = []
+            kls.local_storage.in_use = False
+            kls.local_storage.execution_stack = []
 
 
 
@@ -170,25 +190,27 @@ def execute_iteratively(fn):
         local_redemption_token = RedemptionToken(*args, **kwargs)
 
         try:
-            if local_redemption_token in fn.result_cache:
+            if local_redemption_token in fn.local_storage.result_cache:
                 # memoizing trap for calls to original function
-                result = fn.result_cache[local_redemption_token]
+                result = fn.local_storage.result_cache[local_redemption_token]
                 return result
         except AttributeError:
-            fn.result_cache = {}
-            fn.in_use = False
+            fn.local_storage = threading.local()
+            fn.local_storage.result_cache = {}
+            fn.local_storage.in_use = False
 
-        if fn.in_use:
+        if fn.local_storage.in_use:
             # trap to capture any attempts to recurse beyond the 2 level of
             # the original function
             result = create_unknown(*args, **kwargs)
             return result
         # this section is reached iff it is the original client call to
         # the original function
-        fn.in_use = True
+        fn.local_storage.in_use = True
         first_future = create_unknown(*args, **kwargs)
-        if not ExecutionStack.in_use:
-            ExecutionStack.execution_stack.append(first_future)
+        if not ExecutionStack.is_in_use():
+            ExecutionStack.get_execution_stack().append(first_future)
+            print "PUSH", ExecutionStack.get_execution_stack()
             try:
                 result = ExecutionStack.execute()
             except BaseException:
@@ -196,12 +218,12 @@ def execute_iteratively(fn):
                 # by the function fn, so we've got to catch them all
                 # and make sure that the flag about fn in use has to get
                 # reset
-                fn.in_use = False
+                fn.local_storage.in_use = False
                 raise
         else:
             return first_future
 
-        fn.in_use = False
+        fn.local_storage.in_use = False
         return result
     return wrapper
 
