@@ -164,6 +164,7 @@ class TestCase(unittest.TestCase):
                 return n
             return ifib1(n - 1) + ifib2(n - 2)
 
+        @recursion_watch
         @execute_iteratively
         def ifib2(n):
             if n < 3:
