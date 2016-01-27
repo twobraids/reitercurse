@@ -210,7 +210,7 @@ def execute_iteratively(fn):
         first_future = create_unknown(*args, **kwargs)
         if not ExecutionStack.is_in_use():
             ExecutionStack.get_execution_stack().append(first_future)
-            print "PUSH", ExecutionStack.get_execution_stack()
+##            print "PUSH", ExecutionStack.get_execution_stack()
             try:
                 result = ExecutionStack.execute()
             except BaseException:
