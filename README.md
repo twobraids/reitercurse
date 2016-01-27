@@ -29,7 +29,7 @@ indirect recursion case:
             return ifib2(n - 1) + ifib1(n - 2)
 
 
-muteable argument case:
+mutable argument case:
 
         @execute_iteratively
         def i_quicksort(value_sequence):
