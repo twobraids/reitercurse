@@ -110,6 +110,12 @@ class ExecutionStack(object):
                     result_for_top_unknown = the_top_unknown.defining_function.local_storage.result_cache[the_top_redemption_token]
                 except KeyError:
                     next_args, next_kwargs = the_top_redemption_token
+                    # this is a pivotal function invocation.
+                    # "the_top_unknown.defining_function" is a reference to
+                    # the original function that was wrapped by the decorator.
+                    # However, when this function manages to call itself in an
+                    # attempt to recurse, it doesn't have a reference to itself,
+                    # it has a reference to the wrapper function: "hijacked_fn"
                     result_for_top_unknown = the_top_unknown.defining_function(*next_args, **next_kwargs)
 
                     if isinstance(result_for_top_unknown, UnknownValue):
@@ -117,10 +123,8 @@ class ExecutionStack(object):
                         # push the top unknown back onto the stack
                         execution_stack.append(the_top_unknown)
                         # the quest for a new value for the top unknown
-                        # resulted in the creation of a new unknown. Fetch
-                        # that new unknown from the unknown creation stack
-                        # and push it onto the execution_stack
-                        #result_for_top_unknown.defining_function.execution_stack.append(result_for_top_unknown)
+                        # resulted in the creation of a new unknown. Push it
+                        # onto the execution_stack
                         execution_stack.append(result_for_top_unknown)
 ##                        print "PUSH", execution_stack
                     else:
@@ -190,7 +194,7 @@ def execute_iteratively(fn):
         return future
 
     @wraps(fn)
-    def wrapper(*args, **kwargs):
+    def hijacked_fn(*args, **kwargs):
         """This is the method that actually replaces the recursive function
         and traps the calls to that function. """
 
@@ -232,5 +236,5 @@ def execute_iteratively(fn):
 
         fn.local_storage.in_use = False
         return result
-    return wrapper
+    return hijacked_fn
 
