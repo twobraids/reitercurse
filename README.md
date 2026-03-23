@@ -1,5 +1,7 @@
 # reitercurse
 
+This is a ridiculous hack that allows recursive python funcitons to blow past the recursion limit.
+
 This project is an intellectual exercise, not a serious project for production use. Maybe it will inspire someone to make a more serious version that accomplishes the same thing with more more aplomb and efficiency.  This implementation is likely full of problems, can't-get-there-from-here situations, or other such troubles.  There is no warranty, no guarantee, and the author is absentee.  
 
 Herein is defined a decorator for use on a function written a recursive manner. Using deceit and misdirection, the decorator induces iterative behavior from the recursive function. The decorator hijacks the original method and traps all recursive calls, forcing them to return an Unknown object.  Each Unknown is pushed onto a stack for later evaluation.  When the stack is empty, the final value is returned.
